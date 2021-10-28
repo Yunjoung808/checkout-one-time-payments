@@ -23,8 +23,12 @@ import com.google.gson.annotations.SerializedName;
 
 import com.stripe.Stripe;
 import com.stripe.model.Event;
+import com.stripe.model.EventDataObjectDeserializer;
+import com.stripe.model.PaymentIntent;
+import com.stripe.model.PaymentMethod;
 import com.stripe.model.checkout.Session;
 import com.stripe.model.Price;
+import com.stripe.model.StripeObject;
 import com.stripe.exception.*;
 import com.stripe.net.Webhook;
 import com.stripe.param.checkout.SessionCreateParams;
@@ -39,8 +43,11 @@ public class Server {
     public static void main(String[] args) {
         port(4242);
 
+        //To manage 환경변수 easily
         Dotenv dotenv = Dotenv.load();
 
+
+        //To checking PRICE_ID is set or not
         checkEnv();
 
         Stripe.apiKey = dotenv.get("STRIPE_SECRET_KEY");
@@ -51,100 +58,137 @@ public class Server {
         );
 
 
-        staticFiles.externalLocation(
-                Paths.get(Paths.get("").toAbsolutePath().toString(), dotenv.get("STATIC_DIR")).normalize().toString());
+        staticFiles.externalLocation(Paths.get(Paths.get("").toAbsolutePath().toString(), dotenv.get("STATIC_DIR")).normalize().toString());
 
         get("/config", (request, response) -> {
+            System.out.println("=============START /CONFIG==============");
+
             response.type("application/json");
             Price price = Price.retrieve(dotenv.get("PRICE"));
-
             Map<String, Object> responseData = new HashMap<>();
             responseData.put("publicKey", dotenv.get("STRIPE_PUBLISHABLE_KEY"));
             responseData.put("unitAmount", price.getUnitAmount());
             responseData.put("currency", price.getCurrency());
+            System.out.println("=============FINISH /CONFIG==============");
+
             return gson.toJson(responseData);
         });
 
-        // Fetch the Checkout Session to display the JSON result on the success page
+
+
         get("/checkout-session", (request, response) -> {
+            System.out.println("===========START /CHECKOUT-SESSION============");
+
             response.type("application/json");
+            System.out.println("/checkout-session request::"+request.body());
+            System.out.println("----------------------------------------------------------------------");
 
             String sessionId = request.queryParams("sessionId");
             Session session = Session.retrieve(sessionId);
+
+            System.out.println("session::"+gson.toJson(session));
+            System.out.println("----------------------------------------------------------------------");
+            System.out.println("===========FINISH /CHECKOUT-SESSION============");
 
             return gson.toJson(session);
         });
 
         post("/create-checkout-session", (request, response) -> {
+            System.out.println("===========START /create-checkout-session============");
+
             String domainUrl = dotenv.get("DOMAIN");
             Long quantity = Long.parseLong(request.queryParams("quantity"));
             String price = dotenv.get("PRICE");
 
-            // Pull the comma separated list of payment method types from the
-            // environment variables stored in `.env`.  Then map to uppercase
-            // strings so that we can lookup the PaymentMethodType enum values.
-            //
-            // In practice, you could hard code the list of strings representing
-            // the payment method types you accept.
             String[] pmTypes = dotenv.get("PAYMENT_METHOD_TYPES", "card").split(",", 0);
+
             List<PaymentMethodType> paymentMethodTypes = Stream
               .of(pmTypes)
               .map(String::toUpperCase)
               .map(PaymentMethodType::valueOf)
               .collect(Collectors.toList());
+            //paymentMethidTypes = CARD
+
 
             // Create new Checkout Session for the order
-            // Other optional params include:
-            // [billing_address_collection] - to display billing address details on the page
-            // [customer] - if you have an existing Stripe Customer ID
-            // [customer_email] - lets you prefill the email input in the form
-            // [automatic_tax] - to automatically calculate sales tax, VAT and GST in the checkout page
-            // For full details see https://stripe.com/docs/api/checkout/sessions/create
-
-            // ?session_id={CHECKOUT_SESSION_ID} means the redirect will have the session ID
             // set as a query param
             SessionCreateParams.Builder builder = new SessionCreateParams.Builder()
                     .setSuccessUrl(domainUrl + "/success.html?session_id={CHECKOUT_SESSION_ID}")
                     .setCancelUrl(domainUrl + "/canceled.html")
-                    .addAllPaymentMethodType(paymentMethodTypes)
-                    // .setAutomaticTax(SessionCreateParams.AutomaticTax.builder().setEnabled(true).build())
+                    .addAllPaymentMethodType(paymentMethodTypes) //CARD
                     .setMode(SessionCreateParams.Mode.PAYMENT);
 
-            // Add a line item for the sticker the Customer is purchasing
+            // Promotion code
             LineItem item = new LineItem.Builder().setQuantity(quantity).setPrice(price).build();
             builder.addLineItem(item);
 
             SessionCreateParams createParams = builder.build();
+
             Session session = Session.create(createParams);
 
+            System.out.println("session::"+ session);
+            System.out.println("----------------------------------------------------------------------");
+
             response.redirect(session.getUrl(), 303);
+            System.out.println("===========FINISH /create-checkout-session============");
             return "";
         });
 
+
         post("/webhook", (request, response) -> {
+            System.out.println("===========START /webhook============");
+
+            System.out.println("webhook request::"+ request.body());
+            System.out.println("webhook response::"+response.body());
             String payload = request.body();
             String sigHeader = request.headers("Stripe-Signature");
             String endpointSecret = dotenv.get("STRIPE_WEBHOOK_SECRET");
-
             Event event = null;
 
             try {
                 event = Webhook.constructEvent(payload, sigHeader, endpointSecret);
-            } catch (SignatureVerificationException e) {
-                // Invalid signature
+                System.out.println("event::"+event);
+                System.out.println("----------------------------------------------------------------------");
+            } catch (SignatureVerificationException  e) {
+                // Invalid payload
+                System.out.println("⚠️  Webhook error while parsing basic request.");
                 response.status(400);
                 return "";
             }
 
-            switch (event.getType()) {
-                case "checkout.session.completed":
-                    System.out.println("Payment succeeded!");
-                    response.status(200);
-                    return "";
-                default:
-                    response.status(200);
-                    return "";
+            
+            // Deserialize the nested object inside the event API 버전 체크하기 위해서
+            EventDataObjectDeserializer dataObjectDeserializer = event.getDataObjectDeserializer();
+            StripeObject stripeObject = null;
+
+            if (dataObjectDeserializer.getObject().isPresent()) {
+                stripeObject = dataObjectDeserializer.getObject().get();
+                // System.out.println("stripeObject::"+stripeObject);
+                // System.out.println("----------------------------------------------------------------------");
+            } else {
+                // Deserialization failed, probably due to an API version mismatch.
+                // Refer to the Javadoc documentation on `EventDataObjectDeserializer` for
+                // instructions on how to handle this case, or return an error here.
             }
+
+            //버전이 맞아야 아래 Handle event를 실행할 수 있음.
+
+
+
+            // Handle the event
+            switch (event.getType()) {
+                case "payment_intent.succeeded":
+                    PaymentIntent paymentIntent = (PaymentIntent) stripeObject;
+                    System.out.println("Payment for " + paymentIntent.getAmount() + " succeeded.");
+                    System.out.println("----------------------------------------------------------------------");
+                    break;
+                default:
+                    System.out.println("Unhandled event type: " + event.getType());
+                    System.out.println("************************************************************************************");
+                break;
+            }
+            response.status(200);
+            return "";
         });
     }
 
